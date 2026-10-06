@@ -1,0 +1,4 @@
+disputes.json
+node_modules/
+.env*
+.vercel

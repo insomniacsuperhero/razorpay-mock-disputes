@@ -1,0 +1,12 @@
+{
+  "name": "proof-bridge-mock-disputes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Mock of the Razorpay Disputes API for Proof Bridge (test mode cannot create disputes)",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "dev": "node server.mjs",
+    "test": "node test.mjs"
+  }
+}
