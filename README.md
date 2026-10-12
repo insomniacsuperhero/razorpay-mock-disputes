@@ -1,73 +1,119 @@
-# Mock Razorpay Disputes API (Proof Bridge)
+# Proof Bridge: Mock Razorpay Disputes API (razorpay-mock-disputes)
 
-Razorpay test mode can't create disputes, so this mirrors the documented Disputes API.
-Payments and Documents stay on the real Razorpay test API.
-One codebase runs in two places: **localhost** (`server.mjs`, stores in `disputes.json`) and
-**Vercel** (`api/index.mjs`, stores in Upstash Redis). Zero npm dependencies.
+Razorpay **test mode cannot create disputes**, so this service mirrors the documented [Razorpay Disputes API](https://razorpay.com/docs/api/disputes/). It uses the same routes, the same request and response shapes, the same validation messages and the same signed webhooks. That way the Proof Bridge API works with it exactly as it would with Razorpay. Payments and Documents stay on the **real** Razorpay test API.
+
+**Hosted:** https://razorpay-mock-disputes.vercel.app (`GET /` → `{"service":"proof-bridge-mock-disputes","ok":true}`)
+
+**Step-by-step demo guide** (payment → mock dispute → proof → submit): [END_TO_END_GUIDE.md](https://github.com/insomniacsuperhero/razorpay-frontend/blob/main/docs/END_TO_END_GUIDE.md)
+
+## How it connects to the other two services
+
+| Service | Repo | Hosted | Connection |
+| --- | --- | --- | --- |
+| **Proof Bridge API** | [razorpay-api-py](https://github.com/insomniacsuperhero/razorpay-api-py) | https://proof-bridge-api.onrender.com | **API → mock:** the API's `MOCK_DISPUTES_BASE_URL` points here and calls it with Basic auth (`RZP_KEY:RZP_SECRET`). **Mock → API:** every status change sends a signed webhook to `WEBHOOK_URL` (`…/api/v1/webhooks/disputes`). |
+| **Frontend** | [razorpay-frontend](https://github.com/insomniacsuperhero/razorpay-frontend) | https://razorpay-frontend-ashy.vercel.app | None directly. The app only talks to the API, and the API talks to the mock. |
+| **Razorpay test API** (real) | n/a | https://api.razorpay.com/v1 | The mock fetches the payment when a dispute is created (amount, currency, customer). On every status change it writes `mock_dispute_id`, `mock_dispute_status` and `mock_dispute_reason` into the real payment's notes, so the state shows in the Razorpay dashboard. |
 
 ```
-lib/core.mjs     all routes + validation (shared)
-lib/store.mjs    Upstash Redis if configured, else disputes.json
-api/index.mjs    Vercel function; vercel.json sends every path here
-server.mjs       localhost runner
-test.mjs         offline lifecycle test (node test.mjs)
+Proof Bridge API ──Basic auth (rzp_test key:secret)──► Mock ──fetch payment / PATCH notes──► Razorpay test API
+        ▲                                               │
+        └────── signed webhooks (X-Razorpay-Signature) ──┘
 ```
 
-## Deploy to Vercel (≈10 min)
-1. Push this folder to GitHub (own repo, or `apps/mock-disputes` in your monorepo).
-2. Vercel → **Add New → Project** → import the repo. If it's in a monorepo, set **Root Directory** to this folder.
-   Framework preset: **Other**. No build command.
-3. In the project → **Storage** (Marketplace) → add **Upstash Redis** (free) → connect it to the project.
-   This sets `KV_REST_API_URL` and `KV_REST_API_TOKEN` automatically.
-4. Project → **Settings → Environment Variables**:
-   | Name | Value |
-   |---|---|
-   | `RZP_KEY` | your `rzp_test_...` key |
-   | `RZP_SECRET` | its secret |
-   | `WEBHOOK_URL` | optional — your API's webhook endpoint, e.g. `https://proof-bridge-api.vercel.app/webhooks/razorpay` |
-   | `WEBHOOK_SECRET` | optional — same secret your API verifies with |
-   | `ALLOWED_ORIGIN` | optional — only if a browser calls the mock directly |
-5. **Redeploy** (env vars apply to new deployments). Open `https://<project>.vercel.app/` → `{"ok":true}`.
+## Tech stack
 
-**Auth:** when deployed, every route needs the same Basic auth as Razorpay (`RZP_KEY:RZP_SECRET`), so the
-public URL can't be used by strangers. Localhost stays open (force it with `MOCK_REQUIRE_AUTH=true|false`).
+| Area | Technology |
+| --- | --- |
+| Runtime | Node.js 18+, plain ES modules, **zero npm dependencies** (`fetch`, `crypto`, `http` built in) |
+| Hosting | Vercel serverless function (`api/index.mjs`); `vercel.json` rewrites every path to it, so URLs match Razorpay's |
+| Storage | Upstash Redis over its REST API on Vercel (serverless disk isn't persistent); a `disputes.json` file on localhost |
+| Auth | HTTP Basic with your Razorpay test key and secret, compared in constant time; required when deployed, optional on localhost |
+| Webhooks | HMAC-SHA256 of the raw body with `WEBHOOK_SECRET` in `X-Razorpay-Signature`, plus `X-Razorpay-Event-Id`, as Razorpay does |
 
-## Create a dispute
 ```
-# deployed
-MOCK_URL=https://<project>.vercel.app RZP_KEY=rzp_test_xxx RZP_SECRET=xxx node create_dispute.mjs pay_XXXX
-# localhost
-RZP_KEY=rzp_test_xxx RZP_SECRET=xxx node server.mjs          # terminal 1
-node create_dispute.mjs pay_XXXX not_as_described 24          # terminal 2
+lib/core.mjs        every route, validation and webhook (shared by both runners)
+lib/store.mjs       Upstash Redis if configured, else disputes.json
+api/index.mjs       Vercel function
+server.mjs          localhost runner (port 4010)
+create_dispute.mjs  CLI to raise a dispute against a test payment
+test.mjs            offline lifecycle test (node test.mjs)
 ```
-Postman: set the environment's `mock_base` to `https://<project>.vercel.app` (or keep `http://localhost:4010`).
-The mock folders now send `{{rzp_key}}` / `{{rzp_secret}}` as Basic auth, same as the Razorpay folder.
 
-Tip: set the Upstash env vars locally too (`UPSTASH_REDIS_REST_URL`/`TOKEN` or `KV_REST_API_URL`/`TOKEN`)
-and localhost + Vercel share one dispute list.
+## Spin it up
 
-## Same endpoints as Razorpay
+### Locally
+
+```bash
+git clone https://github.com/insomniacsuperhero/razorpay-mock-disputes.git && cd razorpay-mock-disputes
+RZP_KEY=rzp_test_xxx RZP_SECRET=xxx node server.mjs          # http://localhost:4010
+node test.mjs                                                 # offline lifecycle test
+```
+
+Optional: add `WEBHOOK_URL=http://localhost:8000/api/v1/webhooks/disputes WEBHOOK_SECRET=…` to send webhooks to a local API. Set the Upstash variables (below) to share one dispute list with the deployed mock.
+
+To make a local API use the local mock, set the API's `MOCK_DISPUTES_BASE_URL=http://localhost:4010`.
+
+### On Vercel (about 10 minutes)
+
+1. Import this repo in Vercel. Framework preset: **Other**, no build command.
+2. Project → **Storage / Marketplace** → add **Upstash Redis** (free) and connect it. This sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
+3. Project → **Settings → Environment Variables**:
+
+| Variable | Value |
+| --- | --- |
+| `RZP_KEY` | your `rzp_test_…` key |
+| `RZP_SECRET` | its secret |
+| `WEBHOOK_URL` | `https://proof-bridge-api.onrender.com/api/v1/webhooks/disputes` |
+| `WEBHOOK_SECRET` | the same value as the API's `MOCK_DISPUTES_WEBHOOK_SECRET` |
+| `ALLOWED_ORIGIN` | optional, only if a browser calls the mock directly |
+| `MOCK_REQUIRE_AUTH` | optional: `true` / `false` to force Basic auth on or off (default: on when deployed) |
+
+4. **Redeploy** (environment variables apply to new deployments), then open the URL: you should see `{"ok":true}`.
+
+## Endpoints
+
+Same as Razorpay:
+
 | Method | Path | Notes |
-|---|---|---|
-| GET | /v1/disputes?count=10 | list |
-| GET | /v1/disputes/:id | one dispute |
-| PATCH | /v1/disputes/:id/contest | `action: draft` or `submit`; same validation as the docs |
-| POST | /v1/disputes/:id/accept | status → lost |
+| --- | --- | --- |
+| GET | `/v1/disputes?count=10` | List, newest first |
+| GET | `/v1/disputes/:id` | One dispute |
+| PATCH | `/v1/disputes/:id/contest` | `action: draft \| submit`, evidence fields as lists of `doc_` IDs, `summary` ≤ 1,000 characters, `amount` ≤ the disputed amount. Rejected after the deadline or once under review |
+| POST | `/v1/disputes/:id/accept` | Status → `lost`, amount deducted |
 
-Mock-only:
-- `POST /v1/disputes` `{payment_id, reason_code?, respond_in_hours?, amount?}` — create
-- `POST /mock/disputes/:id/resolve` `{"outcome":"won"|"lost"}` — bank verdict
-- `POST /mock/disputes/:id/action-required` `{"field":"shipping_proof","reason":"..."}` — only from `under_review`; reopens
-- `POST /mock/disputes/:id/close` — concludes, keeps the verdict in `_mock.final_status`
-- `POST /mock/reset`
+Mock-only (to drive the demo):
 
-All six webhook events are emulated and signed (`X-Razorpay-Signature`): created, under_review,
-action_required, won, lost, closed. On Vercel they're sent before the response returns, so nothing is dropped.
+| Method | Path | Body |
+| --- | --- | --- |
+| POST | `/v1/disputes` | `{payment_id, reason_code?, respond_in_hours?, amount?}`: create a dispute on a real captured test payment |
+| POST | `/mock/disputes/:id/resolve` | `{"outcome":"won" \| "lost"}`: the bank's decision |
+| POST | `/mock/disputes/:id/action-required` | `{"field":"shipping_proof","reason":"…","respond_in_hours":48}`: only from `under_review`; reopens the dispute |
+| POST | `/mock/disputes/:id/close` | Concludes it; keeps the verdict in `_mock.final_status` |
+| POST | `/mock/reset` | Deletes every mock dispute |
 
-## Shows up in your Razorpay dashboard
-Every status change writes `mock_dispute_id`, `mock_dispute_status`, `mock_dispute_reason` into the REAL test
-payment's notes (`PATCH /v1/payments/:id`, existing notes kept). Needs `RZP_KEY`/`RZP_SECRET`.
+Reason codes: `goods_not_received`, `not_as_described`, `unauthorized`, `duplicate`, `refund_not_processed`. These are readable demo labels; real disputes carry card-network or UPI codes.
 
-## Going live later
-Point the app's disputes base URL at `https://api.razorpay.com` and drop the create call.
-Reason codes here are readable demo labels; real disputes carry network-specific codes.
+All six webhook events are emulated and signed: `payment.dispute.created`, `.under_review`, `.action_required`, `.won`, `.lost`, `.closed`. On Vercel they are sent before the response returns, so none are dropped.
+
+## Raise a dispute
+
+You need a **captured** Razorpay test payment (`pay_…`). Make one with a test Payment Link paid with UPI `success@razorpay`. The [end-to-end guide](https://github.com/insomniacsuperhero/razorpay-frontend/blob/main/docs/END_TO_END_GUIDE.md#3-make-a-test-payment) has the steps.
+
+```bash
+# CLI (deployed mock)
+MOCK_URL=https://razorpay-mock-disputes.vercel.app RZP_KEY=rzp_test_xxx RZP_SECRET=xxx \
+  node create_dispute.mjs pay_XXXXXXXX goods_not_received 72
+
+# curl
+curl -s -X POST https://razorpay-mock-disputes.vercel.app/v1/disputes \
+  -u 'rzp_test_xxx:YOUR_TEST_SECRET' -H 'Content-Type: application/json' \
+  -d '{"payment_id":"pay_XXXXXXXX","reason_code":"goods_not_received","respond_in_hours":72}'
+```
+
+Raising it here sends `payment.dispute.created` to the API, which sends the seller's alerts. The other way to raise one is the API's `POST /api/v1/demo/seed`, which creates the dispute here and returns a ready alert link.
+
+**Postman:** the Proof Bridge Postman collection includes the mock routes. Set the environment's `mock_base` to `https://razorpay-mock-disputes.vercel.app` (or `http://localhost:4010`).
+
+## Going live
+
+Set the API's `DISPUTES_PROVIDER=razorpay`, which points it at `https://api.razorpay.com`, and stop using the create call. Nothing else changes.
